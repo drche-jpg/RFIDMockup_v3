@@ -210,91 +210,184 @@ def show_password_gate(tag_code):
 # SHARED EDIT / REGISTER FORM
 # ─────────────────────────────────────────────
 def _show_edit_form(tag_code, rec, data, is_empty=False):
+    """
+    Step-by-step edit/register form:
+    Step 1 — Choose mode: Master DB or Manual
+    Step 2 (Master) — Search & select material → load form
+    Step 3 — Edit fields → Save
+    """
     title = "Register Material" if is_empty else "Edit Material"
     st.markdown(f"""
     <div class="edit-header">
-      <div class="edit-header-title">✎  {title}</div>
-      <div class="edit-header-sub">RFID Tag: {tag_code}<br>
-        Select material from master list → click ⚡ Fill → fields auto-fill below.</div>
+      <div class="edit-header-title">✎  {title} — {tag_code}</div>
+      <div class="edit-header-sub">Follow the steps below to fill in material information.</div>
     </div>
     """, unsafe_allow_html=True)
 
-    pf_key = f"pf_{tag_code}"   # stores prefill dict after Fill is clicked
+    # ── Session state keys ────────────────────────────────────
+    mode_key   = f"ef_mode_{tag_code}"      # "master" or "manual"
+    loaded_key = f"ef_loaded_{tag_code}"    # dict of loaded field values (after selecting)
+    form_key   = f"ef_form_{tag_code}"      # True when form should show
 
-    # ── Master selector ───────────────────────────────────────
-    master_df = get_master_df()
-    if master_df is not None:
-        disp = master_display_opts(master_df)
-        c1, c2 = st.columns([4, 1])
+    master_df  = get_master_df()
+
+    # ══════════════════════════════════════════════════════════
+    # STEP 1 — Choose mode
+    # ══════════════════════════════════════════════════════════
+    if mode_key not in st.session_state:
+        st.markdown("### Step 1 — How would you like to fill in the information?")
+        st.markdown(" ")
+        c1, c2 = st.columns(2)
         with c1:
-            chosen = st.selectbox("📋 Select from Master List",
-                options=disp, key=f"ms_{tag_code}")
-        with c2:
-            st.markdown("<br>", unsafe_allow_html=True)
-            fill_btn = st.button("⚡ Fill", key=f"fill_{tag_code}",
-                                 type="primary", use_container_width=True)
-        if fill_btn:
-            if chosen != "— choose material —":
-                st.session_state[pf_key] = prefill_from_master(master_df, chosen, disp)
+            master_disabled = master_df is None
+            hint = "" if not master_disabled else " *(no master list uploaded)*"
+            if st.button(
+                f"📋 From Master Database{hint}",
+                use_container_width=True,
+                type="primary",
+                disabled=master_disabled,
+                key=f"ef_btn_master_{tag_code}"
+            ):
+                st.session_state[mode_key] = "master"
                 st.rerun()
+        with c2:
+            if st.button(
+                "✏️ Fill Manually",
+                use_container_width=True,
+                key=f"ef_btn_manual_{tag_code}"
+            ):
+                # Load existing rec values for manual edit
+                st.session_state[mode_key]   = "manual"
+                st.session_state[loaded_key] = {f: rec.get(f,"") for f in EXPECTED_COLS}
+                st.session_state[form_key]   = True
+                st.rerun()
+
+        if master_disabled:
+            st.info("💡 Upload a Master Material CSV in **Setup** tab to enable database selection.")
+        return
+
+    mode = st.session_state[mode_key]
+
+    # ══════════════════════════════════════════════════════════
+    # STEP 2 (Master mode) — Search & select material
+    # ══════════════════════════════════════════════════════════
+    if mode == "master" and not st.session_state.get(form_key):
+        st.markdown("### Step 2 — Search & select material from Master Database")
+        st.caption(f"{len(master_df)} materials in master list")
+
+        # Search box
+        search_q = st.text_input(
+            "Search material",
+            placeholder="Type material ID, description, plant...",
+            key=f"ef_search_{tag_code}"
+        )
+
+        # Filter master_df
+        if search_q.strip():
+            q = search_q.strip().lower()
+            mask = master_df.apply(
+                lambda row: any(q in str(v).lower() for v in row.values), axis=1
+            )
+            filtered = master_df[mask]
+        else:
+            filtered = master_df
+
+        st.caption(f"{len(filtered)} results")
+
+        if len(filtered) == 0:
+            st.warning("No materials match your search.")
+        else:
+            # Build display list
+            mat_col   = next((c for c in filtered.columns if "Material Description" in c), None)
+            matid_col = next((c for c in filtered.columns if c.strip() == "Material"), None)
+
+            if matid_col and mat_col:
+                options = ["— select material —"] + [
+                    f"{row[matid_col]}  |  {row[mat_col]}"
+                    for _, row in filtered.iterrows()
+                ]
+            elif matid_col:
+                options = ["— select material —"] + filtered[matid_col].tolist()
             else:
-                st.warning("Please select a material first.")
+                options = ["— select material —"] + [f"Row {i+1}" for i in range(len(filtered))]
+
+            chosen = st.selectbox(
+                "Select material",
+                options=options,
+                key=f"ef_chosen_{tag_code}",
+                label_visibility="collapsed"
+            )
+
+            st.markdown(" ")
+            c_load, c_back = st.columns([2, 1])
+            with c_load:
+                if st.button("✅ Load this material into form",
+                             use_container_width=True, type="primary",
+                             key=f"ef_load_{tag_code}",
+                             disabled=(chosen == "— select material —")):
+                    # Find actual row and load values
+                    idx = options.index(chosen) - 1
+                    row = filtered.iloc[idx]
+                    loaded = {f: str(row.get(f,"")).strip()
+                              for f in EXPECTED_COLS if f in filtered.columns}
+                    # Keep RFID Tag Code from tag_code
+                    loaded["RFID Tag Code"] = tag_code
+                    st.session_state[loaded_key] = loaded
+                    st.session_state[form_key]   = True
+                    st.rerun()
+            with c_back:
+                if st.button("← Back", use_container_width=True,
+                             key=f"ef_back_step2_{tag_code}"):
+                    st.session_state.pop(mode_key, None)
+                    st.rerun()
+        return
+
+    # ══════════════════════════════════════════════════════════
+    # STEP 3 — Edit form + Save
+    # ══════════════════════════════════════════════════════════
+    loaded = st.session_state.get(loaded_key, {f: rec.get(f,"") for f in EXPECTED_COLS})
+
+    if mode == "master":
+        mat_name = loaded.get("Material Description", loaded.get("Material",""))
+        st.markdown(f"### Step 3 — Review & Edit")
+        st.success(f"📋 Loaded from Master: **{mat_name}**")
     else:
-        st.info("💡 Upload Master CSV in **Setup** tab to enable auto-fill.")
-        if pf_key not in st.session_state:
-            st.session_state[pf_key] = {}
-
-    st.markdown("---")
-
-    # Get current prefill (set by Fill button, else empty → use rec)
-    pf = st.session_state.get(pf_key, {})
-
-    # If pf has data, show confirmation
-    if pf:
-        mat_name = pf.get("Material Description", pf.get("Material", ""))
-        st.success(f"✅ Auto-filled: **{mat_name}** — edit fields below then save.")
+        st.markdown("### Fill in material information")
 
     st.markdown(f"**RFID Tag Code (fixed):** `{tag_code}`")
     st.markdown("---")
 
-    # ── Field widgets ─────────────────────────────────────────
-    # Use pf value if available, else existing rec value
-    # Values are read back at save time from widget keys directly
+    # ── Widget keys (use wk_ prefix, populated from loaded) ──
+    # On first render of step 3, clear widget keys so loaded values take effect
+    first_render_key = f"ef_first_{tag_code}"
+    if first_render_key not in st.session_state:
+        for field in EXPECTED_COLS:
+            if field == "RFID Tag Code": continue
+            for sfx in ["_sel","_custom","_txt"]:
+                st.session_state.pop(f"wk_{tag_code}_{field}{sfx}", None)
+        st.session_state[first_render_key] = True
+
     col_a, col_b = st.columns(2)
     for j, field in enumerate(EXPECTED_COLS):
-        if field == "RFID Tag Code":
-            continue
-        wkey = f"w_{tag_code}_{field}"   # widget key
-        # Determine value to show: prefill > rec > ""
-        show_val = pf.get(field, rec.get(field, ""))
+        if field == "RFID Tag Code": continue
+        wk = f"wk_{tag_code}_{field}"
+        val = loaded.get(field, "")
         target = col_a if j % 2 == 0 else col_b
-
         with target:
             if field in DROPDOWN_FIELDS:
                 options = get_field_options(data, field)
-                if show_val and show_val not in options:
-                    options = sorted(options + [show_val])
+                if val and val not in options:
+                    options = sorted(options + [val])
                 CUSTOM = "— type custom value —"
                 choices = options + [CUSTOM]
-                # After Fill, always default to show_val
-                if pf:
-                    # Clear old widget key so new index takes effect
-                    st.session_state.pop(wkey, None)
-                    idx = options.index(show_val) if show_val in options else len(choices)-1
-                else:
-                    idx = options.index(show_val) if show_val in options else len(choices)-1
-                sel = st.selectbox(field, choices, index=idx, key=wkey)
+                idx = options.index(val) if val in options else len(choices)-1
+                sel = st.selectbox(field, choices, index=idx, key=f"{wk}_sel")
                 if sel == CUSTOM:
-                    ckey = f"wc_{tag_code}_{field}"
                     st.text_input(f"Custom {field}",
-                        value=pf.get(field,"") if pf else rec.get(field,""),
-                        key=ckey, placeholder=f"Enter {field}...")
+                        value=val, key=f"{wk}_custom",
+                        placeholder=f"Enter {field}...")
             else:
-                st.text_input(field, value=show_val, key=wkey)
-
-    # Clear prefill flag after widgets rendered (so next rerun uses widget values)
-    if pf:
-        st.session_state.pop(pf_key)
+                st.text_input(field, value=val, key=f"{wk}_txt")
 
     st.markdown("---")
     st.markdown(
@@ -305,44 +398,54 @@ def _show_edit_form(tag_code, rec, data, is_empty=False):
         placeholder="Type SAVE here…",
         key=f"ef_confirm_{tag_code}", label_visibility="collapsed")
 
-    cs, cc = st.columns(2)
-    with cs:
-        save_clicked = st.button("💾  Save Material", type="primary",
+    btn_c1, btn_c2, btn_c3 = st.columns([2, 2, 1])
+    with btn_c1:
+        save_clicked = st.button("💾 Save Material", type="primary",
             use_container_width=True, key=f"ef_save_{tag_code}")
-    with cc:
-        cancel_clicked = st.button("✕  Cancel", use_container_width=True,
+    with btn_c2:
+        # Allow going back to re-search (master mode only)
+        if mode == "master":
+            if st.button("🔍 Change material", use_container_width=True,
+                         key=f"ef_change_{tag_code}"):
+                st.session_state.pop(loaded_key, None)
+                st.session_state.pop(form_key, None)
+                st.session_state.pop(first_render_key, None)
+                st.rerun()
+    with btn_c3:
+        cancel_clicked = st.button("✕ Cancel", use_container_width=True,
             key=f"ef_cancel_{tag_code}")
 
     def _cleanup():
         for field in EXPECTED_COLS:
             if field == "RFID Tag Code": continue
-            for pfx in [f"w_{tag_code}_", f"wc_{tag_code}_"]:
-                st.session_state.pop(f"{pfx}{field}", None)
-        for k in [pf_key, f"ms_{tag_code}", f"ef_confirm_{tag_code}",
-                  f"v_mode_{tag_code}", f"auth_ok_{tag_code}", f"v_register_{tag_code}"]:
+            wk = f"wk_{tag_code}_{field}"
+            for sfx in ["_sel","_custom","_txt"]:
+                st.session_state.pop(f"{wk}{sfx}", None)
+        for k in [mode_key, loaded_key, form_key, first_render_key,
+                  f"ef_confirm_{tag_code}", f"ef_search_{tag_code}",
+                  f"ef_chosen_{tag_code}", f"v_mode_{tag_code}",
+                  f"auth_ok_{tag_code}", f"v_register_{tag_code}"]:
             st.session_state.pop(k, None)
 
     if save_clicked:
         if confirm_txt.strip().upper() != "SAVE":
-            st.error("⚠️  Type SAVE in the box above to proceed.")
+            st.error("⚠️ Type SAVE in the confirmation box to proceed.")
         else:
             new_vals = {"RFID Tag Code": tag_code}
             for field in EXPECTED_COLS:
                 if field == "RFID Tag Code": continue
-                wkey = f"w_{tag_code}_{field}"
+                wk = f"wk_{tag_code}_{field}"
                 if field in DROPDOWN_FIELDS:
-                    sv = st.session_state.get(wkey, "")
-                    if sv == "— type custom value —":
-                        new_vals[field] = st.session_state.get(f"wc_{tag_code}_{field}", "")
-                    else:
-                        new_vals[field] = sv
+                    sv = st.session_state.get(f"{wk}_sel", "")
+                    new_vals[field] = (st.session_state.get(f"{wk}_custom","")
+                                      if sv == "— type custom value —" else sv)
                 else:
-                    new_vals[field] = st.session_state.get(wkey, "")
+                    new_vals[field] = st.session_state.get(f"{wk}_txt", "")
             new_vals["_updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             data[tag_code] = new_vals
             save_data(data)
             _cleanup()
-            st.success(f"✅ Tag {tag_code} saved!")
+            st.success(f"✅ Tag {tag_code} saved successfully!")
             st.rerun()
 
     if cancel_clicked:
@@ -708,107 +811,172 @@ def tab_register():
             st.warning("⚠️ Enter an RFID Tag Code above.")
 
         st.markdown("---")
-        st.markdown("### Step 3 — Review & Save")
+        st.markdown("### Step 3 — Fill in material information")
 
-        rpf_key = "rpf_reg"
-
-        # Auto-fill when material selected from Step 2 dropdown
-        if selected_mat != "— choose material —":
-            new_pf = prefill_from_master(master_df, selected_mat, disp)
-            cur_pf = st.session_state.get(rpf_key, {})
-            if new_pf != cur_pf:
-                st.session_state[rpf_key] = new_pf
-
-        # Also allow re-selecting inside step 3
-        rc1, rc2 = st.columns([4, 1])
-        with rc1:
-            r_inner = st.selectbox("📋 Change material (optional)",
-                options=disp, key="r_inner_sel", label_visibility="collapsed")
-        with rc2:
-            st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("⚡ Fill", key="r_inner_fill",
-                         type="primary", use_container_width=True):
-                if r_inner != "— choose material —":
-                    st.session_state[rpf_key] = prefill_from_master(master_df, r_inner, disp)
-                    st.rerun()
-
-        rpf = st.session_state.get(rpf_key, {})
-        if rpf:
-            rn = rpf.get("Material Description", rpf.get("Material",""))
-            st.success(f"✅ Auto-filled: **{rn}** — edit below then save.")
-
-        st.markdown(f"**RFID Tag Code:** `{tag_code or '(not set)'}`")
-        st.markdown("---")
-
-        rca, rcb = st.columns(2)
-        for j, field in enumerate(EXPECTED_COLS):
-            if field == "RFID Tag Code": continue
-            rwk = f"rw_{field}"
-            show_rv = rpf.get(field, "")
-            target = rca if j % 2 == 0 else rcb
-            with target:
-                if field in DROPDOWN_FIELDS:
-                    db = load_data()
-                    opts_r = get_field_options(db, field)
-                    if field in master_df.columns:
-                        for v in master_df[field].dropna().unique():
-                            if str(v).strip(): opts_r = sorted(set(opts_r)|{str(v).strip()})
-                    if show_rv and show_rv not in opts_r:
-                        opts_r = sorted(opts_r + [show_rv])
-                    CUSTOM = "— type custom value —"
-                    choices_r = opts_r + [CUSTOM]
-                    if rpf: st.session_state.pop(rwk, None)
-                    ridx = opts_r.index(show_rv) if show_rv in opts_r else len(choices_r)-1
-                    sel_r = st.selectbox(field, choices_r, index=ridx, key=rwk)
-                    if sel_r == CUSTOM:
-                        st.text_input(f"Custom {field}",
-                            value=rpf.get(field,""),
-                            key=f"rwc_{field}", placeholder=f"Enter {field}...")
-                else:
-                    st.text_input(field, value=show_rv, key=rwk)
-
-        if rpf:
-            st.session_state.pop(rpf_key)
-
-        st.markdown("---")
-        rs1, rs2 = st.columns(2)
-        with rs1:
-            rsave = st.button("💾 Save to Tag", type="primary",
-                use_container_width=True, key="rsave_btn")
-        with rs2:
-            rcancel = st.button("✕ Cancel", use_container_width=True, key="rcancel_btn")
+        rmode_key   = "rq_mode"
+        rloaded_key = "rq_loaded"
+        rform_key   = "rq_form"
+        rfirst_key  = "rq_first"
 
         def _rcleanup():
             for field in EXPECTED_COLS:
                 if field == "RFID Tag Code": continue
-                st.session_state.pop(f"rw_{field}", None)
-                st.session_state.pop(f"rwc_{field}", None)
-            st.session_state.pop("rpf_reg", None)
+                for sfx in ["_sel","_custom","_txt"]:
+                    st.session_state.pop(f"rwk_{field}{sfx}", None)
+            for k in [rmode_key, rloaded_key, rform_key, rfirst_key,
+                      "rq_search","rq_chosen"]:
+                st.session_state.pop(k, None)
 
-        if rsave:
-            if not tag_code:
-                st.error("⚠️ Enter an RFID Tag Code first.")
+        # ── Step 3a: Choose mode ──────────────────────────────
+        if rmode_key not in st.session_state:
+            rc1, rc2 = st.columns(2)
+            with rc1:
+                md = master_df is None
+                if st.button("📋 From Master Database",
+                             use_container_width=True, type="primary",
+                             disabled=md, key="rq_btn_master"):
+                    st.session_state[rmode_key] = "master"
+                    st.rerun()
+            with rc2:
+                if st.button("✏️ Fill Manually",
+                             use_container_width=True, key="rq_btn_manual"):
+                    st.session_state[rmode_key]   = "manual"
+                    st.session_state[rloaded_key] = {f:"" for f in EXPECTED_COLS}
+                    st.session_state[rform_key]   = True
+                    st.rerun()
+
+        elif st.session_state[rmode_key] == "master" and not st.session_state.get(rform_key):
+            # ── Step 3b: Search ───────────────────────────────
+            st.markdown("**Search material from Master Database**")
+            rq = st.text_input("Search", placeholder="Material ID, description...",
+                key="rq_search")
+            if rq.strip():
+                rmask = master_df.apply(
+                    lambda row: any(rq.lower() in str(v).lower() for v in row.values), axis=1)
+                rfiltered = master_df[rmask]
             else:
-                db = load_data()
-                new_vals = {"RFID Tag Code": tag_code}
+                rfiltered = master_df
+            st.caption(f"{len(rfiltered)} results")
+
+            if len(rfiltered) > 0:
+                rmc  = next((c for c in rfiltered.columns if "Material Description" in c), None)
+                rmic = next((c for c in rfiltered.columns if c.strip() == "Material"), None)
+                if rmic and rmc:
+                    ropts = ["— select —"] + [f"{r[rmic]}  |  {r[rmc]}" for _,r in rfiltered.iterrows()]
+                elif rmic:
+                    ropts = ["— select —"] + rfiltered[rmic].tolist()
+                else:
+                    ropts = ["— select —"] + [f"Row {i+1}" for i in range(len(rfiltered))]
+
+                rchosen = st.selectbox("Material", ropts, key="rq_chosen",
+                    label_visibility="collapsed")
+                rl1, rl2 = st.columns([2,1])
+                with rl1:
+                    if st.button("✅ Load into form", use_container_width=True,
+                                 type="primary", key="rq_load",
+                                 disabled=(rchosen=="— select —")):
+                        ridx = ropts.index(rchosen) - 1
+                        rrow = rfiltered.iloc[ridx]
+                        rl = {f: str(rrow.get(f,"")).strip()
+                              for f in EXPECTED_COLS if f in rfiltered.columns}
+                        st.session_state[rloaded_key] = rl
+                        st.session_state[rform_key]   = True
+                        st.rerun()
+                with rl2:
+                    if st.button("← Back", use_container_width=True, key="rq_back"):
+                        st.session_state.pop(rmode_key, None)
+                        st.rerun()
+            else:
+                st.warning("No results.")
+
+        else:
+            # ── Step 3c: Edit form ────────────────────────────
+            rloaded = st.session_state.get(rloaded_key, {f:"" for f in EXPECTED_COLS})
+            rmode   = st.session_state.get(rmode_key, "manual")
+
+            if rmode == "master":
+                rn = rloaded.get("Material Description", rloaded.get("Material",""))
+                st.success(f"📋 Loaded: **{rn}**")
+
+            if not tag_code:
+                st.warning("⚠️ Enter RFID Tag Code in Step 2 above.")
+
+            st.markdown(f"**RFID Tag Code:** `{tag_code or '(not set)'}`")
+            st.markdown("---")
+
+            if rfirst_key not in st.session_state:
                 for field in EXPECTED_COLS:
                     if field == "RFID Tag Code": continue
-                    rwk = f"rw_{field}"
-                    if field in DROPDOWN_FIELDS:
-                        sv = st.session_state.get(rwk,"")
-                        new_vals[field] = st.session_state.get(f"rwc_{field}","") if sv == "— type custom value —" else sv
-                    else:
-                        new_vals[field] = st.session_state.get(rwk,"")
-                new_vals["_updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                db[tag_code] = new_vals
-                save_data(db)
-                _rcleanup()
-                st.success(f"✅ Tag **{tag_code}** registered!")
-                st.balloons()
+                    for sfx in ["_sel","_custom","_txt"]:
+                        st.session_state.pop(f"rwk_{field}{sfx}", None)
+                st.session_state[rfirst_key] = True
 
-        if rcancel:
-            _rcleanup()
-            st.rerun()
+            rca, rcb = st.columns(2)
+            for j, field in enumerate(EXPECTED_COLS):
+                if field == "RFID Tag Code": continue
+                rwk = f"rwk_{field}"
+                rv  = rloaded.get(field,"")
+                target = rca if j % 2 == 0 else rcb
+                with target:
+                    if field in DROPDOWN_FIELDS:
+                        db2 = load_data()
+                        ropts2 = get_field_options(db2, field)
+                        if field in master_df.columns:
+                            for v in master_df[field].dropna().unique():
+                                if str(v).strip(): ropts2 = sorted(set(ropts2)|{str(v).strip()})
+                        if rv and rv not in ropts2:
+                            ropts2 = sorted(ropts2 + [rv])
+                        CUSTOM = "— type custom value —"
+                        rch = ropts2 + [CUSTOM]
+                        ridx2 = ropts2.index(rv) if rv in ropts2 else len(rch)-1
+                        rsel = st.selectbox(field, rch, index=ridx2, key=f"{rwk}_sel")
+                        if rsel == CUSTOM:
+                            st.text_input(f"Custom {field}", value=rv,
+                                key=f"{rwk}_custom", placeholder=f"Enter {field}...")
+                    else:
+                        st.text_input(field, value=rv, key=f"{rwk}_txt")
+
+            st.markdown("---")
+            rs1, rs2, rs3 = st.columns([2,2,1])
+            with rs1:
+                rsave = st.button("💾 Save to Tag", type="primary",
+                    use_container_width=True, key="rq_save")
+            with rs2:
+                if rmode == "master":
+                    if st.button("🔍 Change material", use_container_width=True,
+                                 key="rq_change"):
+                        st.session_state.pop(rloaded_key, None)
+                        st.session_state.pop(rform_key, None)
+                        st.session_state.pop(rfirst_key, None)
+                        st.rerun()
+            with rs3:
+                rcancel = st.button("✕", use_container_width=True, key="rq_cancel")
+
+            if rsave:
+                if not tag_code:
+                    st.error("⚠️ Enter RFID Tag Code first.")
+                else:
+                    db3 = load_data()
+                    new_vals = {"RFID Tag Code": tag_code}
+                    for field in EXPECTED_COLS:
+                        if field == "RFID Tag Code": continue
+                        rwk = f"rwk_{field}"
+                        if field in DROPDOWN_FIELDS:
+                            sv = st.session_state.get(f"{rwk}_sel","")
+                            new_vals[field] = (st.session_state.get(f"{rwk}_custom","")
+                                if sv == "— type custom value —" else sv)
+                        else:
+                            new_vals[field] = st.session_state.get(f"{rwk}_txt","")
+                    new_vals["_updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    db3[tag_code] = new_vals
+                    save_data(db3)
+                    _rcleanup()
+                    st.success(f"✅ Tag **{tag_code}** registered!")
+                    st.balloons()
+
+            if rcancel:
+                _rcleanup()
+                st.rerun()
 
 
     # ════════════════════════════════════════════════════════
@@ -989,102 +1157,172 @@ def tab_manage():
                 st.markdown("---")
                 st.markdown("#### ✎ Edit material data")
 
-                mpf_key = f"mpf_{tc}"
-                master_df = get_master_df()
-
-                if master_df is not None:
-                    disp_mm = master_display_opts(master_df)
-                    mc1, mc2 = st.columns([4, 1])
-                    with mc1:
-                        chosen_mm = st.selectbox("📋 Select from Master List",
-                            options=disp_mm, key=f"mms_{tc}", label_visibility="collapsed")
-                    with mc2:
-                        st.markdown("<br>", unsafe_allow_html=True)
-                        if st.button("⚡ Fill", key=f"mfill_{tc}",
-                                     type="primary", use_container_width=True):
-                            if chosen_mm != "— choose material —":
-                                st.session_state[mpf_key] = prefill_from_master(
-                                    master_df, chosen_mm, disp_mm)
-                                st.rerun()
-                            else:
-                                st.warning("Select a material first.")
-                else:
-                    st.info("💡 Upload Master CSV in Setup tab.")
-
-                st.markdown("---")
-                mpf = st.session_state.get(mpf_key, {})
-                if mpf:
-                    mn = mpf.get("Material Description", mpf.get("Material",""))
-                    st.success(f"✅ Auto-filled: **{mn}** — edit below then save.")
-
-                st.markdown(f"**RFID Tag Code (fixed):** `{tc}`")
-                st.markdown("---")
-
-                mca, mcb = st.columns(2)
-                for j, field in enumerate(EXPECTED_COLS):
-                    if field == "RFID Tag Code": continue
-                    mwk = f"mw_{tc}_{field}"
-                    show_v = mpf.get(field, rec.get(field, ""))
-                    target = mca if j % 2 == 0 else mcb
-                    with target:
-                        if field in DROPDOWN_FIELDS:
-                            opts = get_field_options(data, field)
-                            if show_v and show_v not in opts:
-                                opts = sorted(opts + [show_v])
-                            CUSTOM = "— type custom value —"
-                            choices = opts + [CUSTOM]
-                            if mpf: st.session_state.pop(mwk, None)
-                            idx = opts.index(show_v) if show_v in opts else len(choices)-1
-                            sel = st.selectbox(field, choices, index=idx, key=mwk)
-                            if sel == CUSTOM:
-                                st.text_input(f"Custom {field}",
-                                    value=mpf.get(field,"") if mpf else rec.get(field,""),
-                                    key=f"mwc_{tc}_{field}", placeholder=f"Enter {field}...")
-                        else:
-                            st.text_input(field, value=show_v, key=mwk)
-
-                if mpf:
-                    st.session_state.pop(mpf_key)
-
-                st.markdown("---")
-                ms1, ms2 = st.columns(2)
-                with ms1:
-                    msave = st.button("💾 Save Changes", type="primary",
-                        use_container_width=True, key=f"msave_{tc}")
-                with ms2:
-                    mcancel = st.button("✕ Cancel", use_container_width=True,
-                        key=f"mcancel_{tc}")
+                mmode_key   = f"mm_mode_{tc}"
+                mloaded_key = f"mm_loaded_{tc}"
+                mform_key   = f"mm_form_{tc}"
+                mfirst_key  = f"mm_first_{tc}"
+                master_df   = get_master_df()
 
                 def _mcleanup():
                     for field in EXPECTED_COLS:
                         if field == "RFID Tag Code": continue
-                        st.session_state.pop(f"mw_{tc}_{field}", None)
-                        st.session_state.pop(f"mwc_{tc}_{field}", None)
-                    st.session_state.pop(mpf_key, None)
-                    st.session_state.pop(f"mms_{tc}", None)
+                        for sfx in ["_sel","_custom","_txt"]:
+                            st.session_state.pop(f"mwk_{tc}_{field}{sfx}", None)
+                    for k in [mmode_key, mloaded_key, mform_key, mfirst_key]:
+                        st.session_state.pop(k, None)
+                    st.session_state[f"editing_{tc}"] = False
 
-                if msave:
-                    new_vals = {"RFID Tag Code": tc}
-                    for field in EXPECTED_COLS:
-                        if field == "RFID Tag Code": continue
-                        mwk = f"mw_{tc}_{field}"
-                        if field in DROPDOWN_FIELDS:
-                            sv = st.session_state.get(mwk, "")
-                            new_vals[field] = st.session_state.get(f"mwc_{tc}_{field}","") if sv == "— type custom value —" else sv
+                # ── Step 1: Choose mode ───────────────────────
+                if mmode_key not in st.session_state:
+                    st.markdown("**How would you like to fill in the information?**")
+                    mc1, mc2 = st.columns(2)
+                    with mc1:
+                        md = master_df is None
+                        if st.button("📋 From Master Database",
+                                     use_container_width=True, type="primary",
+                                     disabled=md, key=f"mm_btn_master_{tc}"):
+                            st.session_state[mmode_key] = "master"
+                            st.rerun()
+                        if md: st.caption("Upload Master CSV in Setup first")
+                    with mc2:
+                        if st.button("✏️ Fill Manually",
+                                     use_container_width=True, key=f"mm_btn_manual_{tc}"):
+                            st.session_state[mmode_key]   = "manual"
+                            st.session_state[mloaded_key] = {f: rec.get(f,"") for f in EXPECTED_COLS}
+                            st.session_state[mform_key]   = True
+                            st.rerun()
+                    if st.button("✕ Cancel edit", key=f"mm_cancel_mode_{tc}"):
+                        st.session_state[f"editing_{tc}"] = False
+                        st.rerun()
+
+                elif st.session_state[mmode_key] == "master" and not st.session_state.get(mform_key):
+                    # ── Step 2: Search ────────────────────────
+                    st.markdown("**Search & select material**")
+                    mq = st.text_input("Search material",
+                        placeholder="Material ID, description...",
+                        key=f"mm_search_{tc}")
+                    if mq.strip():
+                        mask = master_df.apply(
+                            lambda row: any(mq.lower() in str(v).lower() for v in row.values), axis=1)
+                        mfiltered = master_df[mask]
+                    else:
+                        mfiltered = master_df
+                    st.caption(f"{len(mfiltered)} results")
+
+                    if len(mfiltered) > 0:
+                        mc = next((c for c in mfiltered.columns if "Material Description" in c), None)
+                        mic = next((c for c in mfiltered.columns if c.strip() == "Material"), None)
+                        if mic and mc:
+                            mopts = ["— select —"] + [f"{r[mic]}  |  {r[mc]}" for _,r in mfiltered.iterrows()]
+                        elif mic:
+                            mopts = ["— select —"] + mfiltered[mic].tolist()
                         else:
-                            new_vals[field] = st.session_state.get(mwk, "")
-                    new_vals["_updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    data[tc] = new_vals
-                    save_data(data)
-                    _mcleanup()
-                    st.session_state[f"editing_{tc}"] = False
-                    st.success("✅ Tag updated!")
-                    st.rerun()
+                            mopts = ["— select —"] + [f"Row {i+1}" for i in range(len(mfiltered))]
 
-                if mcancel:
-                    _mcleanup()
-                    st.session_state[f"editing_{tc}"] = False
-                    st.rerun()
+                        mchosen = st.selectbox("Material", options=mopts,
+                            key=f"mm_chosen_{tc}", label_visibility="collapsed")
+                        ml1, ml2 = st.columns([2,1])
+                        with ml1:
+                            if st.button("✅ Load into form", use_container_width=True,
+                                         type="primary", key=f"mm_load_{tc}",
+                                         disabled=(mchosen=="— select —")):
+                                midx = mopts.index(mchosen) - 1
+                                mrow = mfiltered.iloc[midx]
+                                ml = {f: str(mrow.get(f,"")).strip()
+                                      for f in EXPECTED_COLS if f in mfiltered.columns}
+                                ml["RFID Tag Code"] = tc
+                                st.session_state[mloaded_key] = ml
+                                st.session_state[mform_key]   = True
+                                st.rerun()
+                        with ml2:
+                            if st.button("← Back", use_container_width=True,
+                                         key=f"mm_back_{tc}"):
+                                st.session_state.pop(mmode_key, None)
+                                st.rerun()
+                    else:
+                        st.warning("No results.")
+                        if st.button("← Back", key=f"mm_back2_{tc}"):
+                            st.session_state.pop(mmode_key, None)
+                            st.rerun()
+
+                else:
+                    # ── Step 3: Edit form ─────────────────────
+                    mloaded = st.session_state.get(mloaded_key,
+                        {f: rec.get(f,"") for f in EXPECTED_COLS})
+                    mmode = st.session_state[mmode_key]
+                    if mmode == "master":
+                        mn = mloaded.get("Material Description", mloaded.get("Material",""))
+                        st.success(f"📋 Loaded: **{mn}**")
+
+                    st.markdown(f"**RFID Tag Code (fixed):** `{tc}`")
+                    st.markdown("---")
+
+                    if mfirst_key not in st.session_state:
+                        for field in EXPECTED_COLS:
+                            if field == "RFID Tag Code": continue
+                            for sfx in ["_sel","_custom","_txt"]:
+                                st.session_state.pop(f"mwk_{tc}_{field}{sfx}", None)
+                        st.session_state[mfirst_key] = True
+
+                    mca, mcb = st.columns(2)
+                    for j, field in enumerate(EXPECTED_COLS):
+                        if field == "RFID Tag Code": continue
+                        mwk = f"mwk_{tc}_{field}"
+                        mv  = mloaded.get(field,"")
+                        tgt = mca if j % 2 == 0 else mcb
+                        with tgt:
+                            if field in DROPDOWN_FIELDS:
+                                mopts2 = get_field_options(data, field)
+                                if mv and mv not in mopts2:
+                                    mopts2 = sorted(mopts2 + [mv])
+                                CUSTOM = "— type custom value —"
+                                mch = mopts2 + [CUSTOM]
+                                midx2 = mopts2.index(mv) if mv in mopts2 else len(mch)-1
+                                msel = st.selectbox(field, mch, index=midx2, key=f"{mwk}_sel")
+                                if msel == CUSTOM:
+                                    st.text_input(f"Custom {field}", value=mv,
+                                        key=f"{mwk}_custom", placeholder=f"Enter {field}...")
+                            else:
+                                st.text_input(field, value=mv, key=f"{mwk}_txt")
+
+                    st.markdown("---")
+                    ms1, ms2, ms3 = st.columns([2,2,1])
+                    with ms1:
+                        msave = st.button("💾 Save Changes", type="primary",
+                            use_container_width=True, key=f"mm_save_{tc}")
+                    with ms2:
+                        if mmode == "master":
+                            if st.button("🔍 Change material", use_container_width=True,
+                                         key=f"mm_change_{tc}"):
+                                st.session_state.pop(mloaded_key, None)
+                                st.session_state.pop(mform_key, None)
+                                st.session_state.pop(mfirst_key, None)
+                                st.rerun()
+                    with ms3:
+                        mcancel = st.button("✕", use_container_width=True,
+                            key=f"mm_cancel_{tc}")
+
+                    if msave:
+                        new_vals = {"RFID Tag Code": tc}
+                        for field in EXPECTED_COLS:
+                            if field == "RFID Tag Code": continue
+                            mwk = f"mwk_{tc}_{field}"
+                            if field in DROPDOWN_FIELDS:
+                                sv = st.session_state.get(f"{mwk}_sel","")
+                                new_vals[field] = (st.session_state.get(f"{mwk}_custom","")
+                                    if sv == "— type custom value —" else sv)
+                            else:
+                                new_vals[field] = st.session_state.get(f"{mwk}_txt","")
+                        new_vals["_updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        data[tc] = new_vals
+                        save_data(data)
+                        _mcleanup()
+                        st.success("✅ Tag updated!")
+                        st.rerun()
+
+                    if mcancel:
+                        _mcleanup()
+                        st.rerun()
 
 
 def main():
