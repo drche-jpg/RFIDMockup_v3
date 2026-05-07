@@ -175,7 +175,6 @@ def _show_edit_form(tag_code, rec, data, is_empty=False):
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Master List quick-fill ────────────────────────────────
     with st.expander("📋 Fill from Master List (optional)", expanded=is_empty):
         st.caption("Upload a Master Material List CSV to auto-fill all fields below.")
         master_file_edit = st.file_uploader(
@@ -214,7 +213,6 @@ def _show_edit_form(tag_code, rec, data, is_empty=False):
                             prefill_vals[col] = str(row.get(col, "")).strip()
                     st.success("✅ Fields auto-filled — review and edit below, then save.")
 
-    # ── Edit form ─────────────────────────────────────────────
     with st.form(key=f"viewer_form_{tag_code}"):
         new_vals = {}
         new_vals["RFID Tag Code"] = tag_code
@@ -921,7 +919,47 @@ def tab_manage():
             if st.session_state.get(f"editing_{tc}"):
                 st.markdown("---")
                 st.markdown("#### ✎ Edit material data")
-                st.caption("RFID Tag Code is fixed. Dropdown fields show all known values.")
+
+                # ── Master List quick-fill ────────────────────
+                with st.expander("📋 Fill from Master List (optional)", expanded=False):
+                    st.caption("Upload a Master Material CSV to auto-fill fields below.")
+                    master_file_manage = st.file_uploader(
+                        "Master list CSV", type=["csv"],
+                        key=f"master_manage_{tc}",
+                        label_visibility="collapsed"
+                    )
+                    manage_prefill = {}
+                    if master_file_manage:
+                        df_mm, err_mm = parse_csv_generic(master_file_manage)
+                        if err_mm:
+                            st.error(f"CSV error: {err_mm}")
+                        else:
+                            mat_col_mm   = next((c for c in df_mm.columns if "Material Description" in c), None)
+                            matid_col_mm = next((c for c in df_mm.columns if c.strip() == "Material"), None)
+                            if matid_col_mm and mat_col_mm:
+                                disp_mm = ["— choose material —"] + [
+                                    f"{r[matid_col_mm]} | {r[mat_col_mm]}"
+                                    for _, r in df_mm.iterrows()
+                                ]
+                            elif matid_col_mm:
+                                disp_mm = ["— choose material —"] + df_mm[matid_col_mm].tolist()
+                            else:
+                                disp_mm = ["— choose material —"] + [f"Row {i+1}" for i in range(len(df_mm))]
+
+                            chosen_mm = st.selectbox(
+                                "Select material to auto-fill",
+                                options=disp_mm,
+                                key=f"master_manage_pick_{tc}"
+                            )
+                            if chosen_mm != "— choose material —":
+                                idx_mm = disp_mm.index(chosen_mm) - 1
+                                row_mm = df_mm.iloc[idx_mm]
+                                for col in EXPECTED_COLS:
+                                    if col in df_mm.columns:
+                                        manage_prefill[col] = str(row_mm.get(col, "")).strip()
+                                st.success("✅ Fields auto-filled — review and edit below, then save.")
+
+                st.caption("RFID Tag Code is fixed. Edit any field, then save.")
 
                 with st.form(key=f"form_{tc}"):
                     new_vals = {"RFID Tag Code": tc}
@@ -931,10 +969,12 @@ def tab_manage():
                     field_list = [f for f in EXPECTED_COLS if f != "RFID Tag Code"]
                     for j, field in enumerate(field_list):
                         target = col_a if j % 2 == 0 else col_b
-                        current_val = rec.get(field, "")
+                        current_val = manage_prefill.get(field, rec.get(field, ""))
                         with target:
                             if field in DROPDOWN_FIELDS:
                                 options = get_field_options(data, field)
+                                if current_val and current_val not in options:
+                                    options = sorted(options + [current_val])
                                 CUSTOM = "— type custom value —"
                                 choices = options + [CUSTOM]
                                 default_idx = (options.index(current_val)
