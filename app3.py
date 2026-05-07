@@ -215,14 +215,15 @@ def _show_edit_form(tag_code, rec, data, is_empty=False):
     <div class="edit-header">
       <div class="edit-header-title">✎  {title}</div>
       <div class="edit-header-sub">RFID Tag: {tag_code}<br>
-        Select from known values or "type custom value" for new data.</div>
+        Select from master list to auto-fill, or edit each field manually.</div>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Pull from master (always shown, no re-upload needed) ─
-    master_df = get_master_df()
-    prefill_vals = {}
+    # ── Session state key for this tag's prefill ──────────────
+    pf_key = f"prefill_{tag_code}_{is_empty}"
 
+    # ── Master list selector (OUTSIDE form so it reacts live) ─
+    master_df = get_master_df()
     if master_df is not None:
         disp = master_display_opts(master_df)
         st.markdown("**📋 Select from Master List to auto-fill**")
@@ -231,12 +232,20 @@ def _show_edit_form(tag_code, rec, data, is_empty=False):
             key=f"master_pick_{tag_code}_{is_empty}"
         )
         if chosen != "— choose material —":
-            prefill_vals = prefill_from_master(master_df, chosen, disp)
-            st.success("✅ Fields auto-filled from master list — review and edit below.")
-        st.markdown("---")
+            # Store prefill in session state so form picks it up
+            st.session_state[pf_key] = prefill_from_master(master_df, chosen, disp)
+            st.success("✅ Fields auto-filled — review and edit below, then save.")
+        elif pf_key not in st.session_state:
+            st.session_state[pf_key] = {}
     else:
         st.info("💡 Upload a Master CSV in **Setup → Master Material List** to enable auto-fill.")
-        st.markdown("---")
+        if pf_key not in st.session_state:
+            st.session_state[pf_key] = {}
+
+    # Get current prefill (from master selection or empty)
+    prefill_vals = st.session_state.get(pf_key, {})
+
+    st.markdown("---")
 
     # ── Form ─────────────────────────────────────────────────
     with st.form(key=f"viewer_form_{tag_code}"):
@@ -247,6 +256,7 @@ def _show_edit_form(tag_code, rec, data, is_empty=False):
         for field in EXPECTED_COLS:
             if field == "RFID Tag Code":
                 continue
+            # Prefill from master if selected, else existing rec value
             current_val = prefill_vals.get(field, rec.get(field, ""))
             if field in DROPDOWN_FIELDS:
                 options = get_field_options(data, field)
@@ -268,7 +278,8 @@ def _show_edit_form(tag_code, rec, data, is_empty=False):
                     new_vals[field] = sel
             else:
                 new_vals[field] = st.text_input(
-                    field, value=current_val, key=f"vf_inp_{tag_code}_{field}")
+                    field, value=current_val,
+                    key=f"vf_inp_{tag_code}_{field}")
 
         st.markdown("---")
         st.markdown(
@@ -294,20 +305,21 @@ def _show_edit_form(tag_code, rec, data, is_empty=False):
                 new_vals["_updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 data[tag_code] = new_vals
                 save_data(data)
+                # Clear prefill state
+                st.session_state.pop(pf_key, None)
                 st.session_state.pop(f"v_mode_{tag_code}", None)
                 st.session_state.pop(f"auth_ok_{tag_code}", None)
                 st.session_state.pop(f"v_register_{tag_code}", None)
                 st.success(f"✅ Tag {tag_code} saved successfully!")
                 st.rerun()
         if cancelled:
+            st.session_state.pop(pf_key, None)
             st.session_state.pop(f"v_mode_{tag_code}", None)
             st.session_state.pop(f"auth_ok_{tag_code}", None)
             st.session_state.pop(f"v_register_{tag_code}", None)
             st.rerun()
 
-# ─────────────────────────────────────────────
-# VIEWER MODE
-# ─────────────────────────────────────────────
+
 def show_viewer(tag_code):
     data = load_data()
 
@@ -662,7 +674,15 @@ def tab_register():
         selected_mat = st.selectbox("Material from master list",
             options=disp, key="master_mat_select")
 
-        prefill = prefill_from_master(master_df, selected_mat, disp)
+        # Store prefill in session state so form widget picks it up
+        reg_pf_key = "reg_quick_prefill"
+        if selected_mat != "— choose material —":
+            st.session_state[reg_pf_key] = prefill_from_master(master_df, selected_mat, disp)
+            st.success("✅ Fields auto-filled from master list — edit if needed.")
+        elif reg_pf_key not in st.session_state:
+            st.session_state[reg_pf_key] = {}
+
+        prefill = st.session_state.get(reg_pf_key, {})
 
         if selected_mat == "— choose material —" and not tag_code:
             return
@@ -673,8 +693,6 @@ def tab_register():
 
         if not tag_code:
             st.warning("⚠️ Enter an RFID Tag Code above.")
-        if prefill:
-            st.success("✅ Fields auto-filled from master list — edit if needed.")
 
         with st.form(key="quick_reg_form"):
             st.markdown(f"**RFID Tag Code:** `{tag_code or '(not set)'}`")
@@ -726,9 +744,11 @@ def tab_register():
                     new_vals["_updated_at"]   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     db[tag_code] = new_vals
                     save_data(db)
+                    st.session_state.pop("reg_quick_prefill", None)
                     st.success(f"✅ Tag **{tag_code}** registered!")
                     st.balloons()
             if cancel_btn:
+                st.session_state.pop("reg_quick_prefill", None)
                 st.rerun()
 
     # ════════════════════════════════════════════════════════
@@ -909,8 +929,8 @@ def tab_manage():
                 st.markdown("---")
                 st.markdown("#### ✎ Edit material data")
 
+                mpf_key = f"manage_prefill_{tc}"
                 master_df = get_master_df()
-                manage_prefill = {}
 
                 if master_df is not None:
                     disp_mm = master_display_opts(master_df)
@@ -918,13 +938,18 @@ def tab_manage():
                     chosen_mm = st.selectbox("Master material",
                         options=disp_mm, key=f"master_manage_pick_{tc}")
                     if chosen_mm != "— choose material —":
-                        manage_prefill = prefill_from_master(master_df, chosen_mm, disp_mm)
+                        st.session_state[mpf_key] = prefill_from_master(master_df, chosen_mm, disp_mm)
                         st.success("✅ Fields auto-filled from master list.")
+                    elif mpf_key not in st.session_state:
+                        st.session_state[mpf_key] = {}
                     st.markdown("---")
                 else:
                     st.info("💡 Upload a Master CSV in Setup tab to enable auto-fill.")
                     st.markdown("---")
+                    if mpf_key not in st.session_state:
+                        st.session_state[mpf_key] = {}
 
+                manage_prefill = st.session_state.get(mpf_key, {})
                 st.caption("RFID Tag Code is fixed. Edit any field, then save.")
 
                 with st.form(key=f"form_{tc}"):
@@ -972,10 +997,12 @@ def tab_manage():
                         data[tc] = new_vals
                         save_data(data)
                         st.session_state[f"editing_{tc}"] = False
+                        st.session_state.pop(f"manage_prefill_{tc}", None)
                         st.success("✅ Tag updated!")
                         st.rerun()
                     if cancelled:
                         st.session_state[f"editing_{tc}"] = False
+                        st.session_state.pop(f"manage_prefill_{tc}", None)
                         st.rerun()
 
 # ─────────────────────────────────────────────
