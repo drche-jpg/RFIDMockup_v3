@@ -28,7 +28,7 @@ def save_data(data):
     with open(DATA_FILE, "w") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
-DEFAULT_APP_URL = "https://rfidmockupv3-ctou6fm5nvvhue75tscegg.streamlit.app/"
+DEFAULT_APP_URL = "https://rfidmockupv3-ctou6fm5nvvhue75tscegg.streamlit.app"
 
 def get_base_url():
     if st.session_state.get("base_url"):
@@ -175,6 +175,46 @@ def _show_edit_form(tag_code, rec, data, is_empty=False):
     </div>
     """, unsafe_allow_html=True)
 
+    # ── Master List quick-fill ────────────────────────────────
+    with st.expander("📋 Fill from Master List (optional)", expanded=is_empty):
+        st.caption("Upload a Master Material List CSV to auto-fill all fields below.")
+        master_file_edit = st.file_uploader(
+            "Master list CSV", type=["csv"],
+            key=f"master_edit_{tag_code}",
+            label_visibility="collapsed"
+        )
+        prefill_vals = {}
+        if master_file_edit:
+            df_m, err_m = parse_csv_generic(master_file_edit)
+            if err_m:
+                st.error(f"CSV error: {err_m}")
+            else:
+                mat_col_m   = next((c for c in df_m.columns if "Material Description" in c), None)
+                matid_col_m = next((c for c in df_m.columns if c.strip() == "Material"), None)
+                if matid_col_m and mat_col_m:
+                    disp_opts = ["— choose material —"] + [
+                        f"{row[matid_col_m]} | {row[mat_col_m]}"
+                        for _, row in df_m.iterrows()
+                    ]
+                elif matid_col_m:
+                    disp_opts = ["— choose material —"] + df_m[matid_col_m].tolist()
+                else:
+                    disp_opts = ["— choose material —"] + [f"Row {i+1}" for i in range(len(df_m))]
+
+                chosen = st.selectbox(
+                    "Select material to auto-fill",
+                    options=disp_opts,
+                    key=f"master_pick_{tag_code}"
+                )
+                if chosen != "— choose material —":
+                    idx = disp_opts.index(chosen) - 1
+                    row = df_m.iloc[idx]
+                    for col in EXPECTED_COLS:
+                        if col in df_m.columns:
+                            prefill_vals[col] = str(row.get(col, "")).strip()
+                    st.success("✅ Fields auto-filled — review and edit below, then save.")
+
+    # ── Edit form ─────────────────────────────────────────────
     with st.form(key=f"viewer_form_{tag_code}"):
         new_vals = {}
         new_vals["RFID Tag Code"] = tag_code
@@ -184,9 +224,11 @@ def _show_edit_form(tag_code, rec, data, is_empty=False):
         for field in EXPECTED_COLS:
             if field == "RFID Tag Code":
                 continue
-            current_val = rec.get(field, "")
+            current_val = prefill_vals.get(field, rec.get(field, ""))
             if field in DROPDOWN_FIELDS:
                 options = get_field_options(data, field)
+                if current_val and current_val not in options:
+                    options = sorted(options + [current_val])
                 CUSTOM = "— type custom value —"
                 choices = options + [CUSTOM]
                 default_idx = (options.index(current_val)
@@ -244,6 +286,7 @@ def _show_edit_form(tag_code, rec, data, is_empty=False):
             st.session_state.pop(f"v_mode_{tag_code}", None)
             st.session_state.pop(f"auth_ok_{tag_code}", None)
             st.rerun()
+
 
 def show_viewer(tag_code):
     data = load_data()
@@ -320,10 +363,17 @@ def show_viewer(tag_code):
         </div>
         """, unsafe_allow_html=True)
         st.markdown("### Register new material to this tag")
-        if not check_viewer_auth(tag_code):
-            show_password_gate(tag_code)
+        if not st.session_state.get(f"v_register_{tag_code}", False):
+            if st.button("✎  Register Material", use_container_width=True,
+                         type="primary", key=f"v_reg_btn_{tag_code}"):
+                st.session_state[f"v_register_{tag_code}"] = True
+                st.session_state.pop(f"auth_ok_{tag_code}", None)
+                st.rerun()
         else:
-            _show_edit_form(tag_code, rec, data, is_empty=True)
+            if not check_viewer_auth(tag_code):
+                show_password_gate(tag_code)
+            else:
+                _show_edit_form(tag_code, rec, data, is_empty=True)
         return
 
     st.markdown(f"""
@@ -530,9 +580,6 @@ def tab_register():
     )
     st.markdown("---")
 
-    # ════════════════════════════════════════════════════════
-    # MODE 1 — Quick register from Master List
-    # ════════════════════════════════════════════════════════
     if mode == "🗂 Quick: Select from Master List":
 
         col_upload1, col_upload2 = st.columns(2)
@@ -551,7 +598,6 @@ def tab_register():
                 help="CSV with RFID Tag Code column"
             )
 
-        # Parse master CSV
         master_df = None
         if master_file:
             df_m, err_m = parse_csv_generic(master_file)
@@ -561,7 +607,6 @@ def tab_register():
                 master_df = df_m
                 st.success(f"✅ Master list loaded — {len(master_df)} materials")
 
-        # Parse tag CSV
         tag_options = []
         if tag_file:
             df_t, err_t = parse_csv_generic(tag_file)
@@ -578,7 +623,6 @@ def tab_register():
         st.markdown("---")
         st.markdown("### Register a tag")
 
-        # RFID Tag Code input
         st.markdown("**RFID Tag Code**")
         if tag_options:
             tag_input_mode = st.radio(
@@ -602,7 +646,6 @@ def tab_register():
                 key="tag_manual_input2"
             ).strip()
 
-        # Material selector
         st.markdown("**Select Material from Master List**")
         mat_col   = next((c for c in master_df.columns if "Material Description" in c), None)
         matid_col = next((c for c in master_df.columns if c.strip() == "Material"), None)
@@ -619,7 +662,6 @@ def tab_register():
 
         selected_mat = st.selectbox("Material", options=display_opts, key="master_mat_select")
 
-        # Pre-fill from selected row
         prefill = {}
         if selected_mat != "— choose material —":
             idx = display_opts.index(selected_mat) - 1
@@ -695,9 +737,6 @@ def tab_register():
             if cancel_btn:
                 st.rerun()
 
-    # ════════════════════════════════════════════════════════
-    # MODE 2 — Bulk CSV upload
-    # ════════════════════════════════════════════════════════
     else:
         st.info("Upload a CSV that already has both **RFID Tag Code** and material columns filled in.")
         uploaded = st.file_uploader("Upload your CSV file", type=["csv"], key="reg_csv")
