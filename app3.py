@@ -28,7 +28,7 @@ def save_data(data):
     with open(DATA_FILE, "w") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
-DEFAULT_APP_URL = "https://rfidmockupv2-ybpjtckxtby4yehfv4mxme.streamlit.app"
+DEFAULT_APP_URL = "https://rfidmockupv3-ctou6fm5nvvhue75tscegg.streamlit.app/"
 
 def get_base_url():
     if st.session_state.get("base_url"):
