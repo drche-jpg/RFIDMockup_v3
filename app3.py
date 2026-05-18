@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw, ImageFont
 from datetime import datetime
 
 st.set_page_config(
-    page_title="RFID·QR Material Manager",
+    page_title="Reused RFID·QR Material Manager",
     page_icon="📦",
     layout="wide",
     initial_sidebar_state="collapsed"
